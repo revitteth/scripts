@@ -19,30 +19,35 @@ func padHexString(dataHex string, mSize int) (string, bool) {
 
 	bug := false
 
-	words := []string{}
+	if len(dataHex)%(mSize*2) != 0 || len(dataHex) < 64 {
 
-	for i := 0; i < len(dataHex); i += 64 {
-		end := i + 64
-		if end > len(dataHex) {
-			end = len(dataHex)
+		words := []string{}
+
+		for i := 0; i < len(dataHex); i += 64 {
+			end := i + 64
+			if end > len(dataHex) {
+				end = len(dataHex)
+			}
+			word := dataHex[i:end]
+			words = append(words, word)
 		}
-		word := dataHex[i:end]
-		words = append(words, word)
-	}
 
-	lastWordIndex := len(words) - 1
-	lastWord := words[lastWordIndex]
+		lastWordIndex := len(words) - 1
+		lastWord := words[lastWordIndex]
 
-	if len(lastWord) > 0 && lastWord[0] == '0' && lastWord[1] != '0' {
-		tmpLastWord := lastWord[1:]
-		if len(tmpLastWord) < mSize*2 {
-			bug = true
-			lastWord = tmpLastWord + "0"
+		fmt.Println(lastWord)
+
+		if len(lastWord) > 0 && lastWord[0] == '0' && lastWord[1] != '0' {
+			tmpLastWord := lastWord[1:]
+			if len(tmpLastWord) < mSize*2 {
+				bug = true
+				lastWord = tmpLastWord + "0"
+			}
 		}
-	}
-	words[lastWordIndex] = lastWord
+		words[lastWordIndex] = lastWord
 
-	dataHex = strings.Join(words, "")
+		dataHex = strings.Join(words, "")
+	}
 
 	return "0x" + dataHex, bug
 }
@@ -64,6 +69,11 @@ func main() {
 		7: {hexString: "0000000000000000000000000000000000000000000000000000000000009ce10000000000000000000000005071d96f0251884debe6f2e02fa610df183859e3000000000000000000000000000000000000000000000000000000000000000200000000000000000000000061d79bc5dc25e6c4aee44b34cfcdfb47f0d984100d1dcde1acde7f8bf8e5c1a9f9a3f2394500fa3fcf2620acee012d87fa860745",
 			mSize: 160,
 			bug:   false,
+		},
+		8: {
+			hexString: "0000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000005010203040b0c0d0e001213151a1c1d1f102124252a2b2e2f2031343b3e3f3042434c4d4f41525d5e51a2adaea0b2b3bcbdbfb0c1c4cbcecfc0d1d4d5dadbdedfd0e2e3e5eaecedefe1f2f3f4fbfcfdfef00000000000000000000000000000000",
+			mSize:     160,
+			bug:       false,
 		},
 	}
 

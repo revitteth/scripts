@@ -6,16 +6,26 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
+	"io/ioutil"
+	"log"
+	"net"
 	"net/http"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"regexp"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
+
+	"gopkg.in/yaml.v2"
 )
 
-const (
-	LogLevelThreshold = "ERROR"
-)
+// Alerting configuration and logic
+
+const LogLevelThreshold = "ERROR"
 
 type PatternConfig struct {
 	Pattern        string `json:"pattern"`
@@ -145,13 +155,111 @@ func searchLog(log string, patterns []*regexp.Regexp) (bool, string) {
 	return false, ""
 }
 
+// Port scanning and configuration updating
+
+func findAvailablePort(port int) (int, error) {
+	for {
+		listener, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
+		if err == nil {
+			listener.Close()
+			return port, nil
+		}
+		port++
+	}
+}
+
+func extractPorts(configFile string) (map[string]string, error) {
+	absPath, err := filepath.Abs(configFile)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get absolute path for config file: %w", err)
+	}
+
+	fmt.Println("Reading config file:", absPath)
+
+	content, err := os.ReadFile(absPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read config file %s: %w", absPath, err)
+	}
+
+	var config map[string]interface{}
+	err = yaml.Unmarshal(content, &config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse config file %s: %w", absPath, err)
+	}
+
+	ports := make(map[string]string)
+	for key, value := range config {
+		if strings.Contains(key, "port") || strings.Contains(key, "ports") {
+			fmt.Println(key, value)
+			portList, ok := value.(string)
+			if ok {
+				fmt.Println(key, value)
+				ports[key] = portList
+			}
+		}
+	}
+
+	fmt.Println(ports)
+
+	return ports, nil
+}
+
+func updateConfig(configFile string, ports map[string]string) (string, error) {
+	content, err := os.ReadFile(configFile)
+	if err != nil {
+		return "", fmt.Errorf("failed to read config file %s: %w", configFile, err)
+	}
+
+	var config map[string]interface{}
+	err = yaml.Unmarshal(content, &config)
+	if err != nil {
+		return "", fmt.Errorf("failed to parse config file %s: %w", configFile, err)
+	}
+
+	for key, portList := range ports {
+		portValues := strings.Split(portList, ",")
+		newPortList := []string{}
+
+		for _, portStr := range portValues {
+			port, err := strconv.Atoi(strings.TrimSpace(portStr))
+			if err != nil {
+				return "", err
+			}
+			newPort, err := findAvailablePort(port)
+			if err != nil {
+				return "", err
+			}
+			newPortList = append(newPortList, strconv.Itoa(newPort))
+		}
+
+		newPortStr := strings.Join(newPortList, ", ")
+		config[key] = newPortStr
+		fmt.Printf("Updated %s to %s\n", key, newPortStr)
+	}
+
+	newConfigFile := configFile[:len(configFile)-len(filepath.Ext(configFile))] + "_new" + filepath.Ext(configFile)
+	tempContent, err := yaml.Marshal(config)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal updated config: %w", err)
+	}
+
+	err = ioutil.WriteFile(newConfigFile, tempContent, 0644)
+	if err != nil {
+		return "", fmt.Errorf("failed to write new config file: %w", err)
+	}
+
+	return newConfigFile, nil
+}
+
 func main() {
+	// Command-line arguments
 	configFile := flag.String("config", "config.json", "Path to the configuration file")
 	msgPrefix := flag.String("msg", "", "Chat message prefix")
+	erigonRepo := flag.String("repo", ".", "Path to the cdk-erigon repository")
+	erigonConfig := flag.String("erigon-config", "hermezconfig-bali.yaml", "Path to the erigon configuration file")
 	flag.Parse()
 
-	fmt.Println("prefix:", *msgPrefix)
-
+	// Read config for alerts
 	config, err := readConfig(*configFile)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error reading config file: %v\n", err)
@@ -172,18 +280,60 @@ func main() {
 	defaultCooldown := time.Duration(config.DefaultTimeoutMinutes) * time.Minute
 	alertManager := NewAlertManager(defaultCooldown, patternCooldowns)
 
-	scanner := bufio.NewScanner(os.Stdin)
+	// Port configuration
+	erigonConfigPath := filepath.Join(*erigonRepo, *erigonConfig)
+	fmt.Println("Updating ports in config file:", erigonConfigPath)
+	originalPorts, err := extractPorts(erigonConfigPath)
+	if err != nil {
+		log.Fatalf("Error extracting ports from config file: %v", err)
+	}
+
+	tempConfigFile, err := updateConfig(erigonConfigPath, originalPorts)
+	if err != nil {
+		log.Fatalf("Error updating config file: %v", err)
+	}
+	defer os.Remove(tempConfigFile) // Clean up temporary file
+
+	// Build the cdk-erigon
+	buildCmd := exec.Command("make", "cdk-erigon")
+	buildCmd.Dir = *erigonRepo
+	if err := buildCmd.Run(); err != nil {
+		log.Fatalf("Build failed: %v", err)
+	}
+
+	// Run the cdk-erigon with the updated config file
+	runCmd := exec.Command("./build/bin/cdk-erigon", "--config="+tempConfigFile)
+	runCmd.Dir = *erigonRepo
+	stdout, err := runCmd.StdoutPipe()
+	if err != nil {
+		log.Fatalf("Error creating stdout pipe: %v", err)
+	}
+	stderr, err := runCmd.StderrPipe()
+	if err != nil {
+		log.Fatalf("Error creating stderr pipe: %v", err)
+	}
+
+	if err := runCmd.Start(); err != nil {
+		log.Fatalf("Error starting cdk-erigon: %v", err)
+	}
+
+	// Read and process logs
+	scanner := bufio.NewScanner(io.MultiReader(stdout, stderr))
 	for scanner.Scan() {
-		log := scanner.Text()
-		fmt.Println(log)
-		logToFile(log, config.LogFile, *msgPrefix)
-		if match, pattern := searchLog(log, regexPatterns); match {
+		logLine := scanner.Text()
+		fmt.Println(logLine)
+		logToFile(logLine, config.LogFile, *msgPrefix)
+		if match, pattern := searchLog(logLine, regexPatterns); match {
 			if shouldSend, suppressionCount := alertManager.ShouldSendAlert(pattern); shouldSend {
-				sendGoogleChatAlert(config.WebhookURL, *msgPrefix, log, suppressionCount)
+				sendGoogleChatAlert(config.WebhookURL, *msgPrefix, logLine, suppressionCount)
 			}
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		fmt.Fprintf(os.Stderr, "Error reading standard input: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error reading log output: %v\n", err)
+	}
+
+	if err := runCmd.Wait(); err != nil {
+		log.Fatalf("cdk-erigon finished with error: %v", err)
 	}
 }
