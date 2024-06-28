@@ -152,6 +152,13 @@ func main() {
 
 	fmt.Println("prefix:", *msgPrefix)
 
+	hostname, err := os.Hostname()
+	if err != nil {
+		fmt.Printf("Error getting hostname: %v\n", err)
+		return
+	}
+	fmt.Printf("Hostname: %s\n", hostname)
+
 	config, err := readConfig(*configFile)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error reading config file: %v\n", err)
@@ -172,6 +179,8 @@ func main() {
 	defaultCooldown := time.Duration(config.DefaultTimeoutMinutes) * time.Minute
 	alertManager := NewAlertManager(defaultCooldown, patternCooldowns)
 
+	prefixString := fmt.Sprintf("[%s]: %s", hostname, *msgPrefix)
+
 	scanner := bufio.NewScanner(os.Stdin)
 	for scanner.Scan() {
 		log := scanner.Text()
@@ -179,7 +188,7 @@ func main() {
 		logToFile(log, config.LogFile, *msgPrefix)
 		if match, pattern := searchLog(log, regexPatterns); match {
 			if shouldSend, suppressionCount := alertManager.ShouldSendAlert(pattern); shouldSend {
-				sendGoogleChatAlert(config.WebhookURL, *msgPrefix, log, suppressionCount)
+				sendGoogleChatAlert(config.WebhookURL, prefixString, log, suppressionCount)
 			}
 		}
 	}
